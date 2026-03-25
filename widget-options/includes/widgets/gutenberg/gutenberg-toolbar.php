@@ -201,37 +201,11 @@ if (wp_use_widgets_block_editor()) {
 			$instance['extended_widget_opts-' . $obj->id] = widgetopts_sanitize_array($instance['extended_widget_opts-' . $obj->id]);
 		}
 
-		// Protect legacy display logic: always restore old DB value (prevents injection AND data loss)
+		// Legacy display logic: admins keep as-is, non-admins have it stripped
 		if (isset($instance['extended_widget_opts-' . $obj->id]['class'])) {
-			$cls = &$instance['extended_widget_opts-' . $obj->id]['class'];
-			$wopt_ver = isset($cls['wopt_version']) ? $cls['wopt_version'] : '';
-			$has_snippet = !empty($cls['logic_snippet_id']);
-			$has_legacy = !empty($cls['logic']);
-
-			// If wopt_version >= 4.2: legacy logic is obsolete — clear it
-			if ($wopt_ver !== '' && version_compare($wopt_ver, '4.2', '>=')) {
-				if ($has_legacy) {
-					$cls['logic'] = '';
-				}
+			if (!current_user_can('administrator')) {
+				$instance['extended_widget_opts-' . $obj->id]['class']['logic'] = '';
 			}
-			// Auto-clear legacy logic if snippet_id is already set (migration done)
-			elseif ($has_snippet) {
-				$cls['logic'] = '';
-				$cls['wopt_version'] = WIDGETOPTS_VERSION;
-			}
-			// User intentionally cleared legacy logic via Clear button
-			elseif (!empty($cls['logic_cleared'])) {
-				$cls['logic'] = '';
-				unset($cls['logic_cleared']);
-				$cls['wopt_version'] = WIDGETOPTS_VERSION;
-			} else {
-				$old_logic = '';
-				if (isset($old_instance['extended_widget_opts-' . $obj->id]['class']['logic']) && $old_instance['extended_widget_opts-' . $obj->id]['class']['logic'] !== '') {
-					$old_logic = $old_instance['extended_widget_opts-' . $obj->id]['class']['logic'];
-				}
-				$cls['logic'] = $old_logic;
-			}
-			unset($cls);
 		}
 
 		return $instance;
@@ -244,55 +218,33 @@ add_filter('rest_pre_insert_page', 'widgetopts_rest_pre_insert', 10, 2);
 function widgetopts_rest_pre_insert($post, $request)
 {
 	if (!current_user_can('edit_posts')) {
-		return $post; // Security check: Only users with permission can edit
-	}
-
-	if (current_user_can('administrator')) {
-		// Admins can modify all attributes EXCEPT legacy display logic (security)
-		if (!empty($post->post_content) && !empty($post->ID)) {
-			$old_post = get_post($post->ID);
-			if ($old_post && !empty($old_post->post_content)) {
-				$old_blocks = parse_blocks($old_post->post_content);
-				$new_blocks = parse_blocks($post->post_content);
-				if (is_array($new_blocks) && !empty($new_blocks)) {
-					$old_blocks_lkp = [];
-					widgetopt_process_blocks_recursively($old_blocks, $old_blocks_lkp);
-					foreach ($new_blocks as &$nb) {
-						widgetopt_modify_block_attributes($nb, $old_blocks_lkp);
-					}
-					$post->post_content = serialize_blocks($new_blocks);
-				}
-			}
-		}
 		return $post;
 	}
 
-	if (empty($post->post_content) || empty($post->ID)) {
-		return $post; // Exit if no content or post ID
+	// Admins: don't touch legacy logic at all (no parse/serialize cycle)
+	if (current_user_can('administrator')) {
+		return $post;
 	}
 
-	// Get the old post content before editing
-	$old_post = get_post($post->ID);
+	// Non-admins: strip legacy logic from all blocks
+	if (empty($post->post_content)) {
+		return $post;
+	}
 
-	// Parse blocks from the old post content (recursively)
-	$old_blocks = !$old_post ? [] : parse_blocks($old_post->post_content);
-	// Parse blocks from the new post content
+	if (strpos($post->post_content, 'extended_widget_opts') === false) {
+		return $post;
+	}
+
 	$new_blocks = parse_blocks($post->post_content);
-
 	if (!is_array($new_blocks) || empty($new_blocks)) {
-		return $post; // Exit if no blocks found
+		return $post;
 	}
 
-	// Convert old blocks into a lookup table using anchor or unique ID (recursively process)
-	$old_blocks_lookup = [];
-	widgetopt_process_blocks_recursively($old_blocks, $old_blocks_lookup);
-
-	foreach ($new_blocks as &$new_block) {
-		widgetopt_modify_block_attributes($new_block, $old_blocks_lookup);
+	$changed = false;
+	widgetopts_strip_logic_from_blocks($new_blocks, $changed);
+	if ($changed) {
+		$post->post_content = serialize_blocks($new_blocks);
 	}
-
-	// Convert modified blocks back to post content
-	$post->post_content = serialize_blocks($new_blocks);
 
 	return $post;
 }
@@ -320,110 +272,74 @@ function widgetopt_process_blocks_recursively(&$blocks, &$old_blocks_lookup)
 	}
 }
 
-// Recursively modify block attributes (parent and inner blocks)
 function widgetopt_modify_block_attributes(&$block, $old_blocks_lookup)
 {
 	if (!isset($block['blockName'])) {
-		return; // Skip invalid blocks
+		return;
 	}
 
-	// Find the old block using the anchor (or generated unique ID)
-	$anchor = $block['attrs']['anchor'] ?? md5(json_encode($block['innerContent'])); // Generate unique ID if missing
-	$old_data = $old_blocks_lookup[$anchor] ?? [];
-	$old_attrs = $old_data['attrs'] ?? [];
-
-	//do the modification
-	if (isset($block['attrs']['extended_widget_opts'])) {
-		if (isset($block['attrs']['extended_widget_opts']['class'])) {
-			$cls = &$block['attrs']['extended_widget_opts']['class'];
-			$wopt_ver = isset($cls['wopt_version']) ? $cls['wopt_version'] : '';
-			$has_snippet = !empty($cls['logic_snippet_id']);
-			$has_legacy = !empty($cls['logic']);
-
-			// If wopt_version >= 4.2: legacy logic is obsolete — clear it
-			if ($wopt_ver !== '' && version_compare($wopt_ver, '4.2', '>=')) {
-				if ($has_legacy) {
-					$cls['logic'] = '';
-				}
-			}
-			// Auto-clear legacy logic if snippet_id is already set (migration done)
-			elseif ($has_snippet) {
-				$cls['logic'] = '';
-				$cls['wopt_version'] = WIDGETOPTS_VERSION;
-			}
-			// User intentionally cleared legacy logic via Clear button
-			elseif (!empty($cls['logic_cleared'])) {
-				$cls['logic'] = '';
-				unset($cls['logic_cleared']);
-				$cls['wopt_version'] = WIDGETOPTS_VERSION;
-			} elseif (isset($old_attrs['extended_widget_opts']) && isset($old_attrs['extended_widget_opts']['class']) && isset($old_attrs['extended_widget_opts']['class']['logic']) && !empty($old_attrs['extended_widget_opts']['class']['logic'])) {
-				$cls['logic'] = $old_attrs['extended_widget_opts']['class']['logic'];
-			} else {
-				$cls['logic'] = '';
-			}
-			unset($cls);
-		}
+	if (isset($block['attrs']['extended_widget_opts']['class']['logic'])
+		&& $block['attrs']['extended_widget_opts']['class']['logic'] !== '') {
+		$block['attrs']['extended_widget_opts']['class']['logic'] = '';
 	}
 
-	// If the block has inner blocks, recurse through them
 	if (isset($block['innerBlocks']) && !empty($block['innerBlocks'])) {
 		foreach ($block['innerBlocks'] as &$inner_block) {
-			widgetopt_modify_block_attributes($inner_block, $old_blocks_lookup); // Recursively modify inner blocks
+			widgetopt_modify_block_attributes($inner_block, $old_blocks_lookup);
 		}
 	}
 }
 
 /**
- * Protect legacy display logic from injection on ALL save paths
- * (classic editor, programmatic saves, direct DB manipulation via forms).
- * Covers cases that rest_pre_insert_post/page don't catch.
+ * Recursively strip legacy logic from parsed blocks.
+ * Used for non-admin users to prevent logic injection.
+ *
+ * @param array &$blocks Parsed blocks array.
+ * @param bool  &$changed Set to true if any logic was stripped.
+ */
+function widgetopts_strip_logic_from_blocks(&$blocks, &$changed) {
+	foreach ($blocks as &$block) {
+		if (isset($block['attrs']['extended_widget_opts']['class']['logic'])
+			&& $block['attrs']['extended_widget_opts']['class']['logic'] !== '') {
+			$block['attrs']['extended_widget_opts']['class']['logic'] = '';
+			$changed = true;
+		}
+		if (!empty($block['innerBlocks'])) {
+			widgetopts_strip_logic_from_blocks($block['innerBlocks'], $changed);
+		}
+	}
+}
+
+/**
+ * Strip legacy display logic for non-admin users on ALL save paths.
+ * Admins: no processing at all (no parse/serialize cycle).
+ * Non-admins: strip legacy logic fields to prevent injection.
  * 
  * @since 5.1
  */
 add_filter('wp_insert_post_data', function($data, $postarr) {
-	if (empty($data['post_content']) || empty($postarr['ID'])) {
+	if (current_user_can('administrator')) {
 		return $data;
 	}
 
-	// Only process if content has blocks with extended_widget_opts
+	if (empty($data['post_content'])) {
+		return $data;
+	}
+
 	if (strpos($data['post_content'], 'extended_widget_opts') === false) {
 		return $data;
 	}
 
-	$old_post = get_post($postarr['ID']);
-	if (!$old_post || empty($old_post->post_content)) {
-		// New post — strip any logic fields entirely (no old data to preserve)
-		$new_blocks = parse_blocks($data['post_content']);
-		if (!is_array($new_blocks) || empty($new_blocks)) return $data;
-		$changed = false;
-		$strip_logic = function(&$blocks) use (&$strip_logic, &$changed) {
-			foreach ($blocks as &$block) {
-				if (isset($block['attrs']['extended_widget_opts']['class']['logic']) && $block['attrs']['extended_widget_opts']['class']['logic'] !== '') {
-					$block['attrs']['extended_widget_opts']['class']['logic'] = '';
-					$changed = true;
-				}
-				if (!empty($block['innerBlocks'])) $strip_logic($block['innerBlocks']);
-			}
-		};
-		$strip_logic($new_blocks);
-		if ($changed) {
-			$data['post_content'] = serialize_blocks($new_blocks);
-		}
+	$new_blocks = parse_blocks($data['post_content']);
+	if (!is_array($new_blocks) || empty($new_blocks)) {
 		return $data;
 	}
 
-	$old_blocks = parse_blocks($old_post->post_content);
-	$new_blocks = parse_blocks($data['post_content']);
-	if (!is_array($new_blocks) || empty($new_blocks)) return $data;
-
-	$old_blocks_lkp = [];
-	widgetopt_process_blocks_recursively($old_blocks, $old_blocks_lkp);
-
-	foreach ($new_blocks as &$nb) {
-		widgetopt_modify_block_attributes($nb, $old_blocks_lkp);
+	$changed = false;
+	widgetopts_strip_logic_from_blocks($new_blocks, $changed);
+	if ($changed) {
+		$data['post_content'] = serialize_blocks($new_blocks);
 	}
-
-	$data['post_content'] = serialize_blocks($new_blocks);
 	return $data;
 }, 10, 2);
 

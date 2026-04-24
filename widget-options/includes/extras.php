@@ -495,8 +495,7 @@ function widgetopts_get_user_agent()
 function widgetopts_safe_eval($expression)
 {
     if (widgetopts_is_widget_or_post_preview()) {
-        // Always return true for previews unless the user is an administrator
-        if (!current_user_can('administrator')) {
+        if (!current_user_can('manage_options')) {
             return true;
         }
     }
@@ -609,9 +608,20 @@ function widgetopts_get_allowed_php_functions()
         'wordwrap',
 
         // Array Manipulation
+        'array_merge',
+        'array_diff',
+        'array_keys',
+        'array_values',
         'in_array',
         'count',
         'sizeof',
+        'array_slice',
+        'array_push',
+        'array_pop',
+        'array_intersect',
+        'array_unique',
+        'array_column',
+        'array_reverse',
 
         // Math Functions
         'abs',
@@ -684,8 +694,7 @@ function widgetopts_get_allowed_php_functions()
         'pathinfo',
         'basename',
         'dirname',
-        'file_exists',
-        'readfile',
+        'file_exists'
     ];
 }
 
@@ -820,6 +829,28 @@ function widgetopts_get_allowed_wp_functions()
 }
 
 /**
+ * Return the nearest significant token relative to $index, skipping whitespace and comments.
+ *
+ * @param array $tokens  Token array from token_get_all().
+ * @param int   $index   Starting position.
+ * @param int   $dir     1 = look forward (next), -1 = look backward (prev).
+ * @return array|string|null The token, or null if none found.
+ */
+function widgetopts_adjacent_significant_token(array $tokens, int $index, int $dir)
+{
+    $skip  = [T_WHITESPACE, T_COMMENT, T_DOC_COMMENT];
+    $count = count($tokens);
+    for ($i = $index + $dir; $dir === 1 ? $i < $count : $i >= 0; $i += $dir) {
+        $t = $tokens[$i];
+        if (is_array($t) && in_array($t[0], $skip, true)) {
+            continue;
+        }
+        return $t;
+    }
+    return null;
+}
+
+/**
  * Validate PHP code against allowed functions and detect obfuscated calls.
  *
  * @param string $code The PHP code to validate.
@@ -836,19 +867,42 @@ function widgetopts_validate_code_with_tokens($code, $allowed_functions)
 
     $tokens = token_get_all($code);
     $is_safe = true;
-    $last_token = null;
+
+    // Language constructs that are NOT T_STRING — the allowlist loop would silently skip them.
+    // T_EVAL / T_INCLUDE* / T_REQUIRE* are also caught by the regex in widgetopts_validate_expression,
+    // but blocking them here provides an independent second layer.
+    $forbidden_constructs = [T_EVAL, T_INCLUDE, T_INCLUDE_ONCE, T_REQUIRE, T_REQUIRE_ONCE, T_EXIT, T_GOTO];
 
     foreach ($tokens as $index => $token) {
         if (is_array($token)) {
-            $token_type = $token[0];
+            $token_type  = $token[0];
             $token_value = $token[1];
 
-            // **Fix: Properly detect function calls inside conditions**
-            if ($token_type === T_STRING) {
-                $function_name = strtolower($token_value);
-                $next_token = $tokens[$index + 1] ?? null;
+            // Block language constructs (eval, include, require, exit, goto).
+            // These produce dedicated token types, not T_STRING, so the allowlist
+            // check below would silently pass them.
+            if (in_array($token_type, $forbidden_constructs, true)) {
+                $is_safe = false;
+                break;
+            }
 
-                if ($next_token === '(' || (is_array($next_token) && $next_token[0] === T_WHITESPACE && ($tokens[$index + 2] ?? null) === '(')) {
+            // Detect function calls — skip non-significant tokens before '('
+            if ($token_type === T_STRING) {
+                $next = widgetopts_adjacent_significant_token($tokens, $index, 1);
+                if ($next === '(') {
+                    // Block method/static/nullsafe calls: $obj->func(), Class::func(), $obj?->func()
+                    // The identifier looks like an allowed function name but is actually a method —
+                    // the allowlist covers only direct (free) function calls.
+                    $prev = widgetopts_adjacent_significant_token($tokens, $index, -1);
+                    $method_ops = [T_OBJECT_OPERATOR, T_DOUBLE_COLON];
+                    if (defined('T_NULLSAFE_OBJECT_OPERATOR')) {
+                        $method_ops[] = T_NULLSAFE_OBJECT_OPERATOR; // PHP 8.0+ (?->)
+                    }
+                    if (is_array($prev) && in_array($prev[0], $method_ops, true)) {
+                        $is_safe = false;
+                        break;
+                    }
+                    $function_name = strtolower($token_value);
                     if (!in_array($function_name, array_map('strtolower', $allowed_functions))) {
                         $is_safe = false;
                         break;
@@ -856,22 +910,30 @@ function widgetopts_validate_code_with_tokens($code, $allowed_functions)
                 }
             }
 
-            // **Fix: Detect if T_ENCAPSED_AND_WHITESPACE is being treated as code**
+            // Detect if T_ENCAPSED_AND_WHITESPACE is being treated as code
             if ($token_type === T_ENCAPSED_AND_WHITESPACE) {
                 $is_safe = false;
                 break;
             }
 
-            // **Fix: Dynamic Function Execution (`$func()` or `['test']()`)**
+            // Dynamic call via variable or string literal: `$fn()` / `'func'()`
+            // Skip non-significant tokens between the token and '('
             if ($token_type === T_VARIABLE || $token_type === T_CONSTANT_ENCAPSED_STRING) {
-                $next_token = $tokens[$index + 1] ?? null;
-                if ($next_token === '(') {
+                $next = widgetopts_adjacent_significant_token($tokens, $index, 1);
+                if ($next === '(') {
                     $is_safe = false;
                     break;
                 }
             }
-
-            $last_token = $token;
+        } elseif ($token === ']' || $token === ')') {
+            // Subscript-then-call  `$arr['key']()`  and
+            // Concat-then-call     `('fi'.'le_put_contents')()`
+            // Skip non-significant tokens (whitespace / comments) before '('
+            $next = widgetopts_adjacent_significant_token($tokens, $index, 1);
+            if ($next === '(') {
+                $is_safe = false;
+                break;
+            }
         }
     }
 

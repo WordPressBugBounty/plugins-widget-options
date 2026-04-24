@@ -4,11 +4,12 @@ Tags: widget control, blocks, blocks visibility rules, gutenberg widgets, classi
 Requires at least: 5.6
 Tested up to: 6.7
 Requires PHP: 7.4
-Stable tag: 4.2.2
+Stable tag: 4.2.3
 License: GPLv2 or later
 License URI: http://www.gnu.org/licenses/gpl-2.0.html
+0ddcemmihs4a843ekhaoofzosrunf4bl
 
-Widget Options gives you control over widgets and Gutenberg blocks across pages, posts, and custom post types to manage content visibility.
+Widget Options gives you super powers to control your site’s sidebar widgets and all Gutenberg blocks on pages, posts & other custom post types.
 
 == Description ==
 
@@ -193,6 +194,14 @@ Widget Options is a featured pack fully lightweight plugin. Using Query Monitor 
 
 == Changelog ==
 
+= 4.2.3 =
+
+* Fixed: Resolved PHP deprecated issues within the plugin.
+* Fixed: Resolved authenticated (Contributor+) remote code execution vulnerability.
+* Fixed: Resolved additional security vulnerabilities in the Display Logic feature.
+* Fixed: Validation to block additional dangerous patterns in Display Logic expressions.
+* Improved: Validation of widgetopts-settings-nonce to unauthorized settings changes.
+
 = 4.2.2 =
 
 * Fix: Resolved plugin compatibility issues with non-native WP blocks, including ACF Pro, Kadence Blocks, and others.
@@ -209,10 +218,6 @@ Widget Options is a featured pack fully lightweight plugin. Using Query Monitor 
 * Fix: Resolved Remote Code Execution (RCE) vulnerability
 * Fix: Resolved Improper Neutralization of Directives in Dynamically Evaluated Code ('Eval Injection') vulnerability
 
-= 4.1.3 =
-
-* Update: Adjusted the plugin description to follow the latest WordPress directory guidelines.
-* Fix: Improved input validation and output handling to prevent possible security issues that could allow unwanted scripts to run on pages.
 = 4.1.3 =
 
 * Update: Adjusted the plugin description to follow the latest WordPress directory guidelines.

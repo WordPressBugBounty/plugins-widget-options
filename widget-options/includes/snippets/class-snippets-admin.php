@@ -117,7 +117,7 @@ class WidgetOpts_Snippets_Admin {
 
         // Migration page (hidden from menu, accessible via direct link)
         self::$migration_hook = add_submenu_page(
-            null,
+            '',
             __('Display Logic Migration', 'widget-options'),
             __('Display Logic Migration', 'widget-options'),
             WIDGETOPTS_MIGRATION_PERMISSIONS,

@@ -203,7 +203,7 @@ if (wp_use_widgets_block_editor()) {
 
 		// Legacy display logic: admins keep as-is, non-admins have it stripped
 		if (isset($instance['extended_widget_opts-' . $obj->id]['class'])) {
-			if (!current_user_can('administrator')) {
+			if (!current_user_can('manage_options')) {
 				$instance['extended_widget_opts-' . $obj->id]['class']['logic'] = '';
 			}
 		}
@@ -222,7 +222,7 @@ function widgetopts_rest_pre_insert($post, $request)
 	}
 
 	// Admins: don't touch legacy logic at all (no parse/serialize cycle)
-	if (current_user_can('administrator')) {
+	if (current_user_can('manage_options')) {
 		return $post;
 	}
 
@@ -231,7 +231,8 @@ function widgetopts_rest_pre_insert($post, $request)
 		return $post;
 	}
 
-	if (strpos($post->post_content, 'extended_widget_opts') === false) {
+	if (strpos($post->post_content, 'extended_widget_opts') === false
+		&& strpos($post->post_content, 'start_widgetopts') === false) {
 		return $post;
 	}
 
@@ -283,6 +284,11 @@ function widgetopt_modify_block_attributes(&$block, $old_blocks_lookup)
 		$block['attrs']['extended_widget_opts']['class']['logic'] = '';
 	}
 
+	if (isset($block['attrs']['extended_widget_opts_block']['class']['logic'])
+		&& $block['attrs']['extended_widget_opts_block']['class']['logic'] !== '') {
+		$block['attrs']['extended_widget_opts_block']['class']['logic'] = '';
+	}
+
 	if (isset($block['innerBlocks']) && !empty($block['innerBlocks'])) {
 		foreach ($block['innerBlocks'] as &$inner_block) {
 			widgetopt_modify_block_attributes($inner_block, $old_blocks_lookup);
@@ -299,11 +305,62 @@ function widgetopt_modify_block_attributes(&$block, $old_blocks_lookup)
  */
 function widgetopts_strip_logic_from_blocks(&$blocks, &$changed) {
 	foreach ($blocks as &$block) {
+		// Standard Gutenberg block attributes
 		if (isset($block['attrs']['extended_widget_opts']['class']['logic'])
 			&& $block['attrs']['extended_widget_opts']['class']['logic'] !== '') {
 			$block['attrs']['extended_widget_opts']['class']['logic'] = '';
 			$changed = true;
 		}
+		if (isset($block['attrs']['extended_widget_opts_block']['class']['logic'])
+			&& $block['attrs']['extended_widget_opts_block']['class']['logic'] !== '') {
+			$block['attrs']['extended_widget_opts_block']['class']['logic'] = '';
+			$changed = true;
+		}
+
+		// Legacy freeform format: <!--start_widgetopts {"class":{"logic":"..."}} end_widgetopts-->
+		// parse_blocks() stores this raw in innerContent (blockName = null, attrs = []),
+		// so the attribute checks above never fire for it.
+		if (empty($block['blockName']) && !empty($block['innerContent'])) {
+			foreach ($block['innerContent'] as &$chunk) {
+				if (!is_string($chunk) || strpos($chunk, 'start_widgetopts') === false) {
+					continue;
+				}
+				// Permissive outer pattern so crafted payloads like
+				// {...} <!--start_widgetopts end_widgetopts--> (parsing-differential
+				// attack) are also matched.
+				$chunk = preg_replace_callback(
+					'/<!--start_widgetopts\s+([\s\S]*?)\s*end_widgetopts-->/U',
+					static function ($m) use (&$changed) {
+						$raw  = trim($m[1]);
+						$data = json_decode($raw, true);
+
+						if (!is_array($data)) {
+							// Trailing garbage after valid JSON (crafted payload).
+							// Find the last } and try decoding up to that point.
+							$pos = strrpos($raw, '}');
+							if ($pos !== false) {
+								$data = json_decode(substr($raw, 0, $pos + 1), true);
+							}
+						}
+
+						if (!is_array($data)) {
+							// Completely unrecoverable — remove entire marker.
+							$changed = true;
+							return '';
+						}
+
+						if (isset($data['class']['logic']) && $data['class']['logic'] !== '') {
+							$data['class']['logic'] = '';
+							$changed = true;
+						}
+						return '<!--start_widgetopts ' . wp_json_encode($data) . ' end_widgetopts-->';
+					},
+					$chunk
+				);
+			}
+			unset($chunk);
+		}
+
 		if (!empty($block['innerBlocks'])) {
 			widgetopts_strip_logic_from_blocks($block['innerBlocks'], $changed);
 		}
@@ -318,7 +375,7 @@ function widgetopts_strip_logic_from_blocks(&$blocks, &$changed) {
  * @since 5.1
  */
 add_filter('wp_insert_post_data', function($data, $postarr) {
-	if (current_user_can('administrator')) {
+	if (current_user_can('manage_options')) {
 		return $data;
 	}
 
@@ -326,11 +383,17 @@ add_filter('wp_insert_post_data', function($data, $postarr) {
 		return $data;
 	}
 
-	if (strpos($data['post_content'], 'extended_widget_opts') === false) {
+	// wp_insert_post_data fires BEFORE wp_unslash() inside wp_insert_post(),
+	// so post_content still carries magic-quote backslashes (\" and \').
+	// Unslash before processing so parse_blocks sees clean JSON.
+	$content = wp_unslash($data['post_content']);
+
+	if (strpos($content, 'extended_widget_opts') === false
+		&& strpos($content, 'start_widgetopts') === false) {
 		return $data;
 	}
 
-	$new_blocks = parse_blocks($data['post_content']);
+	$new_blocks = parse_blocks($content);
 	if (!is_array($new_blocks) || empty($new_blocks)) {
 		return $data;
 	}
@@ -338,7 +401,9 @@ add_filter('wp_insert_post_data', function($data, $postarr) {
 	$changed = false;
 	widgetopts_strip_logic_from_blocks($new_blocks, $changed);
 	if ($changed) {
-		$data['post_content'] = serialize_blocks($new_blocks);
+		// Re-slash so WordPress's subsequent wp_unslash() inside wp_insert_post()
+		// produces the correct clean string when writing to the database.
+		$data['post_content'] = wp_slash(serialize_blocks($new_blocks));
 	}
 	return $data;
 }, 10, 2);
@@ -995,12 +1060,18 @@ function widgetopts_add_classes_post_block($block_content, $parsed_block, $obj)
 /**
  * Gutenberg ajax functions
  */
+function widgetopts_verify_gutenberg_ajax()
+{
+	if (!current_user_can('edit_posts')) {
+		wp_send_json_error('Permission denied.', 403);
+		exit;
+	}
+}
+
 function widgetopts_get_types()
 {
+	widgetopts_verify_gutenberg_ajax();
 	global $widgetopts_types;
-	if (!(current_user_can('edit_pages') || current_user_can('edit_posts') || current_user_can('edit_theme_options'))) {
-		die;
-	}
 
 	wp_send_json_success(((!empty($widgetopts_types)) ? $widgetopts_types : widgetopts_global_types()));
 	die;
@@ -1010,10 +1081,8 @@ add_action('wp_ajax_widgetopts_get_types', 'widgetopts_get_types');
 
 function widgetopts_get_taxonomies()
 {
+	widgetopts_verify_gutenberg_ajax();
 	global $widgetopts_taxonomies;
-	if (!(current_user_can('edit_pages') || current_user_can('edit_posts') || current_user_can('edit_theme_options'))) {
-		die;
-	}
 
 	wp_send_json_success(((!empty($widgetopts_taxonomies)) ? $widgetopts_taxonomies : widgetopts_global_taxonomies()));
 	die;
@@ -1022,9 +1091,7 @@ add_action('wp_ajax_widgetopts_get_taxonomies', 'widgetopts_get_taxonomies');
 
 function widgetopts_acf_get_field_groups()
 {
-	if (!(current_user_can('edit_pages') || current_user_can('edit_posts') || current_user_can('edit_theme_options'))) {
-		die;
-	}
+	widgetopts_verify_gutenberg_ajax();
 
 	$fields = array();
 	if (function_exists('acf_get_field_groups')) {
@@ -1050,9 +1117,7 @@ add_action('wp_ajax_widgetopts_acf_get_field_groups', 'widgetopts_acf_get_field_
 
 function widgetopts_get_legacy_data()
 {
-	if (!(current_user_can('edit_pages') || current_user_can('edit_posts') || current_user_can('edit_theme_options'))) {
-		die;
-	}
+	widgetopts_verify_gutenberg_ajax();
 
 	if (isset($_POST['id_base'])) {
 		wp_send_json_success(array());
@@ -1076,14 +1141,8 @@ add_action('wp_ajax_widgetopts_get_legacy_data', 'widgetopts_get_legacy_data');
 
 function widgetopts_get_settings_ajax()
 {
-	if (!(current_user_can('edit_pages') || current_user_can('edit_posts') || current_user_can('edit_theme_options'))) {
-		die;
-	}
+	widgetopts_verify_gutenberg_ajax();
 	$settings = widgetopts_get_settings();
-
-	if (!current_user_can('administrator')) {
-		$settings['logic'] = 'deactivate';
-	}
 
 	wp_send_json_success($settings);
 	die;
@@ -1092,9 +1151,7 @@ add_action('wp_ajax_widgetopts_get_settings_ajax', 'widgetopts_get_settings_ajax
 
 function widgetopts_get_snippets_ajax()
 {
-	if (!(current_user_can('edit_pages') || current_user_can('edit_posts') || current_user_can('edit_theme_options'))) {
-		die;
-	}
+	widgetopts_verify_gutenberg_ajax();
 
 	$search = isset($_POST['search']) ? sanitize_text_field($_POST['search']) : '';
 
@@ -1123,9 +1180,7 @@ add_action('wp_ajax_widgetopts_get_snippets_ajax', 'widgetopts_get_snippets_ajax
 
 function widgetopts_get_pages()
 {
-	if (!(current_user_can('edit_pages') || current_user_can('edit_posts') || current_user_can('edit_theme_options'))) {
-		die;
-	}
+	widgetopts_verify_gutenberg_ajax();
 
 	$pages = [];
 
@@ -1156,9 +1211,7 @@ add_action('wp_ajax_widgetopts_get_pages', 'widgetopts_get_pages');
 
 function widgetopts_get_terms()
 {
-	if (!(current_user_can('edit_pages') || current_user_can('edit_posts') || current_user_can('edit_theme_options'))) {
-		die;
-	}
+	widgetopts_verify_gutenberg_ajax();
 
 	$terms = array();
 
@@ -1178,11 +1231,8 @@ add_action('wp_ajax_widgetopts_get_terms', 'widgetopts_get_terms');
 
 function widgetopts_get_users()
 {
+	widgetopts_verify_gutenberg_ajax();
 	global $wp_version;
-
-	if (!(current_user_can('edit_pages') || current_user_can('edit_posts') || current_user_can('edit_theme_options'))) {
-		die;
-	}
 
 	$authors = array();
 
@@ -1212,9 +1262,7 @@ add_action('wp_ajax_widgetopts_get_users', 'widgetopts_get_users');
 
 function widgetopts_ajax_roles_search_block()
 {
-	if (!(current_user_can('edit_pages') || current_user_can('edit_posts') || current_user_can('edit_theme_options'))) {
-		die;
-	}
+	widgetopts_verify_gutenberg_ajax();
 	$response = [
 		'results' => [],
 		'pagination' => ['more' => false]

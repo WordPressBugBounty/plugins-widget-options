@@ -408,6 +408,74 @@ add_filter('wp_insert_post_data', function($data, $postarr) {
 	return $data;
 }, 10, 2);
 
+// Flag the block-renderer REST dispatch so render_block_data below can
+// scope its sha256-allowlist work to that single route.
+add_filter('rest_pre_dispatch', function ($result, $server, $request) {
+	if ($request instanceof WP_REST_Request
+		&& strpos((string) $request->get_route(), '/wp/v2/block-renderer/') === 0) {
+		$GLOBALS['_widgetopts_in_block_renderer'] = true;
+	}
+	return $result;
+}, 1, 3);
+
+add_filter('rest_post_dispatch', function ($response, $server, $request) {
+	unset($GLOBALS['_widgetopts_in_block_renderer']);
+	return $response;
+}, 1, 3);
+
+// Block-renderer accepts user-supplied attributes without a save step.
+// For non-admins, allowlist class.logic against a sha256 of values stored in
+// the post's post_content; mismatched values are zeroed before render_callback.
+add_filter('render_block_data', function ($parsed_block) {
+	if (!defined('REST_REQUEST') || !REST_REQUEST) {
+		return $parsed_block;
+	}
+	if (empty($GLOBALS['_widgetopts_in_block_renderer'])) {
+		return $parsed_block;
+	}
+
+	if (!is_array($parsed_block) || empty($parsed_block['attrs'])) {
+		return $parsed_block;
+	}
+	if (current_user_can('manage_options')) {
+		return $parsed_block;
+	}
+
+	$has_inline = (
+		(isset($parsed_block['attrs']['extended_widget_opts']['class']['logic'])
+			&& $parsed_block['attrs']['extended_widget_opts']['class']['logic'] !== '')
+		|| (isset($parsed_block['attrs']['extended_widget_opts_block']['class']['logic'])
+			&& $parsed_block['attrs']['extended_widget_opts_block']['class']['logic'] !== '')
+	);
+	if (!$has_inline) {
+		return $parsed_block;
+	}
+
+	$post_id = 0;
+	$current = get_post();
+	if ($current instanceof WP_Post) {
+		$post_id = (int) $current->ID;
+	}
+	if (!$post_id && isset($_REQUEST['post_id'])) {
+		$post_id = absint($_REQUEST['post_id']);
+	}
+
+	$allow = $post_id ? widgetopts_get_post_logic_allowlist($post_id) : array();
+
+	foreach (array('extended_widget_opts', 'extended_widget_opts_block') as $key) {
+		if (isset($parsed_block['attrs'][$key]['class']['logic'])
+			&& is_string($parsed_block['attrs'][$key]['class']['logic'])
+			&& $parsed_block['attrs'][$key]['class']['logic'] !== '') {
+			$hash = hash('sha256', $parsed_block['attrs'][$key]['class']['logic']);
+			if (!isset($allow[$hash])) {
+				$parsed_block['attrs'][$key]['class']['logic'] = '';
+			}
+		}
+	}
+
+	return $parsed_block;
+}, 5);
+
 add_filter('render_block', function ($block_content, $parsed_block, $obj) {
 	if (!is_admin()) {
 		add_filter("render_block_{$obj->name}", "blockopts_filter_before_display", 100, 3);
@@ -963,7 +1031,7 @@ function blockopts_filter_before_display($block_content, $parsed_block, $obj)
 				// 	$display_logic = "return (" . $display_logic . ");";
 				// }
 				$display_logic = htmlspecialchars_decode($display_logic, ENT_QUOTES);
-				if (!widgetopts_safe_eval($display_logic)) {
+				if (!widgetopts_safe_eval_trusted($display_logic)) {
 					return false;
 				}
 			}

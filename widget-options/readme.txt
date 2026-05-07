@@ -2,12 +2,11 @@
 Contributors: marketingfire
 Tags: widget control, blocks, blocks visibility rules, gutenberg widgets, classic widgets
 Requires at least: 5.6
-Tested up to: 6.7
+Tested up to: 6.9
 Requires PHP: 7.4
-Stable tag: 4.2.3
+Stable tag: 4.2.4
 License: GPLv2 or later
 License URI: http://www.gnu.org/licenses/gpl-2.0.html
-0ddcemmihs4a843ekhaoofzosrunf4bl
 
 Widget Options gives you super powers to control your site’s sidebar widgets and all Gutenberg blocks on pages, posts & other custom post types.
 
@@ -193,6 +192,11 @@ Widget Options is a featured pack fully lightweight plugin. Using Query Monitor 
 14. Elementor Pagebuilder Integration
 
 == Changelog ==
+
+= 4.2.4 =
+
+* Improved: Strengthened security for Authenticated (Contributor+) Remote Code Execution vulnerability
+* Added: “Talk with AI Assistant” button on the plugin page.
 
 = 4.2.3 =
 

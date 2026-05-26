@@ -2,9 +2,9 @@
 Contributors: marketingfire
 Tags: widget control, blocks, blocks visibility rules, gutenberg widgets, classic widgets
 Requires at least: 5.6
-Tested up to: 6.9
+Tested up to: 7.0
 Requires PHP: 7.4
-Stable tag: 4.2.4
+Stable tag: 4.2.5
 License: GPLv2 or later
 License URI: http://www.gnu.org/licenses/gpl-2.0.html
 
@@ -192,6 +192,10 @@ Widget Options is a featured pack fully lightweight plugin. Using Query Monitor 
 14. Elementor Pagebuilder Integration
 
 == Changelog ==
+
+= 4.2.5 =
+
+* Improved: Updated and tested for WordPress version 7.0
 
 = 4.2.4 =
 
